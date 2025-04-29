@@ -1,0 +1,413 @@
+---
+title: "Case Study: Diabetes Prediction Via Bayesian Logistic Regression Using MCMC Sampling"
+author: "Laura Carralero, Daniel Losada, Raúl Rodríguez, Gabriel Pons"
+date: "5/3/2025"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(MCMCpack)
+library(MASS)
+library(dplyr)
+library(caret)
+```
+
+# Diabetes bayesian prediction
+
+For this project we have chosen a dataset, sourced from the National Institute of Diabetes and Digestive and Kidney Diseases, that aims to predict the likelihood of diabetes in patients based on various diagnostic measures. The dataset can be found in kaggle in the next link: https://www.kaggle.com/uciml/pima-indians-diabetes-database. 
+
+The dataset consists of several medical predictor variables, such as the number of pregnancies, Body Mass Index (BMI), insulin levels, age, and more, alongside a target variable, Outcome, which indicates whether or not a patient has diabetes.
+For this study case we are going to use the numerics variables:
+
+- **Glucose**:concentration of glucose (sugar) in the blood, measured in mg/dL (milligrams per deciliter). The normal range for blood glucose levels is typically 70-99 mg/dL when fasting. Higher values could indicate the presence of prediabetes or diabetes.
+Elevated glucose levels are a hallmark of diabetes because the body either becomes resistant to insulin or doesn’t produce enough insulin to maintain normal blood sugar levels.
+High glucose levels are a key factor in diagnosing and monitoring diabetes.
+
+- **Body Mass Index**: a measure of body fat based on a person’s height and weight. It is calculated as:
+$$
+BMI = \frac{\text{Weight(kg)}}{height(m)^2}
+$$
+
+
+It's typically expressed as $kg/m^2$.
+BMI is a significant risk factor for Type 2 diabetes. Higher BMI, especially obesity, increases the risk of developing insulin resistance, where the body becomes less responsive to insulin. Insulin resistance can lead to high blood glucose levels and, eventually, Type 2 diabetes.
+
+- **Diabetes Pedegree function**: a function that measures the genetic predisposition to diabetes based on family history. Its range usually falls between 0.08 to 2.42, but it could extend slightly in some datasets.A value closer to 0 indicates lower genetic risk or few to no family members with diabetes while a higher value suggests a greater genetic predisposition to the disease.
+
+- **Insulin**: The Insulin variable refers to the level of insulin in the blood, typically measured in µU/mL (microunits per milliliter). Elevated levels might indicate insulin resistance, which is commonly associated with Type 2 diabetes.
+Low insulin levels, on the other hand, may indicate insulin deficiency, which is more common in Type 1 diabetes, where the pancreas cannot produce enough insulin.
+
+- **Skinthickness**: thickness of a person's triceps skinfold, measured in millimeters (mm). This is a measure of subcutaneous fat—the fat located just under the skin.  In general, a higher skinfold thickness indicates higher levels of body fat. Higher skinfold thickness is generally associated with higher body fat, which can lead to insulin resistance, increasing the likelihood of developing Type 2 diabetes.
+ 
+- **Outcome**: This is typically a binary variable (0 or 1) indicating whether the person has diabetes or not.  
+
+
+
+```{r dataset, echo =FALSE}
+
+#setwd("C:/Users/Gabriel/Desktop/MÁSTERS/3º SEMI C/BAYESIANA/PROYECTO")
+data <- read.csv("diabetes.csv")
+
+```
+
+
+## 1. Data cleansing
+
+To guarantee the best possible analysis, we eliminate observations with values equal to zero in the variables BMI, Glucose, BloodPressure, SkinThickness, and Insulin, as these values do not make sense for these variables.
+
+```{r data cleansing, echo =FALSE}
+for (var in c("BMI", "Glucose", "BloodPressure", "SkinThickness", "Insulin")) {
+  data <- data[data[[var]] != 0, ]
+}
+dimen <- dim(data)
+
+```
+
+Notice that the dataset has 768 observations and 9 variables and after cleaning the data (avoiding the zero values in variables were it is not possible) we have 724 observations.
+
+We check if the variable desired to be predicted is balanced:
+
+```{r, echo = FALSE}
+proportion <- sum(data[data[['Outcome']] != 0, 9])/dimen[1]
+
+print(paste("The proportion is ", proportion))
+```
+We observe that 33% of the observations are from individuals with diabetes, which indicates that the dataset is imbalanced. Next, we will examine the correlations between the variables to identify any columns that might provide redundant information, helping us refine the dataset for more effective analysis.
+
+```{r correlations, cache= TRUE, warning= TRUE}
+
+# Install and load necessary packages 
+library(GGally)
+library(ggplot2)
+
+# Select the numeric variables of the dataset 
+vars_num <-  data %>% dplyr::select(-Outcome, -Age, -Pregnancies)
+
+# Create a graph matrix 
+ggpairs(vars_num, 
+        # Dispersion appears in the low part
+        lower = list(continuous = wrap("points", alpha = 0.5)),  
+        # Densities are in the diagonal
+        diag = list(continuous = wrap("densityDiag", alpha = 0.5)), 
+        # THe upper triangle is formed by the correlations 
+        upper = list(continuous = wrap("cor", size = 5)))  
+
+```
+
+From this dataset, we can conclude that our variables are generally independent, except for BMI and Skin Thickness, which have a correlation of 0.66, and Insulin and Glucose, which have a correlation of 0.58. This makes sense since both BMI and Skin Thickness are related to body fat, and Insulin and Glucose are both indicators of the body’s ability to process sugar. Therefore, we have decided to drop the Skin Thickness variable, as it is less reliable in measuring body fat compared to BMI, and we are also removing the Insulin variable, as it is highly correlated with Glucose levels, and keeping both would likely result in redundant information.
+
+
+Overall the variables that will be used to predict whether a patient has diabetes or not are: glocuse, BMI, DiabetesPedigreeFunction and BloodPressure.
+
+
+## 2. Logistic regression models 
+
+### 2.1. Train and test splitting
+
+Now, we have divided the dataset into training and testing sets, with 70% of the data allocated for training the model and 30% reserved for testing. This split will allow us to train the model effectively while evaluating its performance and accuracy on unseen data.
+
+```{r}
+vars_final <- data %>% dplyr::select(-Pregnancies, -Age, -SkinThickness, Insulin)
+
+# 70% train 30%  test
+set.seed(123)  
+indice_train <- createDataPartition(data$Outcome, p = 0.7, list = FALSE)
+
+# Sets for train and test
+train <- data[indice_train, ]
+test <- data[-indice_train, ]
+
+```
+
+We now verify that the proportions of the diabetes observations remain the same in the train and test sets: 
+
+```{r}
+sum(train[train[['Outcome']] != 0, 9])/nrow(train)
+sum(test[test[['Outcome']] != 0, 9])/nrow(test)
+```
+
+
+
+### 2.2. Logit regresion using MCMC
+
+The `MCMCpack` package in R provides tools for Bayesian analysis using Markov Chain Monte Carlo (MCMC) methods. In this project we have decided to perform a **logistic regression to predict the probability of an individual having diabetes**, where the coefficients of the logistic regression will be estimated using MCMC. The MCMC generates a posterior distribution for each regression coefficient to afterwards create an estimations of this coefficients.
+
+We are going to explain briefly some of the parameters we are using for this function:
+
+* **thin = 20**: Thinning is the process aim to reduce the autocorrelation of the MCMC samples by keeping only every n-th sample, in our case we are keeping every 10th sample. This can be useful when consecutive samples are highly correlated, which can happen if the Markov chains do not explore the parameter space well and get stuck in local 'barriers'; which is what happened in this model when the parameter by default was used (thin=1).
+
+* **Burnin = 1000**: the burn-in period is the number of initial MCMC iterations that are discarded, therefore burnin = 1000 means that the first 1000 iterations will be discarded, and only the following iterations will be used to estimate the posterior distribution.
+
+* **mcmc = 2100**:  this parameter specifies the total number of MCMC iterations to be run after the burn-in period, in our case we have chosen 2100 iterations. 
+
+
+We are going to use firstly the method that is given by default with the function `MCMClogit`, which as a prior for each $\beta$ uses the following improper distribution:
+
+$$
+\beta_i \sim Normal(0, \infty ),
+$$
+
+so that we do not suppose any prior information about the coefficients. 
+
+
+Let's create the logistic regression model with the parameters explained before:
+
+```{r}
+
+#Logistic regression model with MCMC
+out = MCMClogit(Outcome~ Glucose + BMI + DiabetesPedigreeFunction + BloodPressure, # Regression model with 2 variables (those we have chosen) and therefore 2 parameters beta to be estimated
+                data= train, # Our dataset
+                thin = 20, 
+                burnin=1000, # Number of iterations to be discarded
+                mcmc=2100) # Total number of iterations to draw from the posterior distribution after burn-in.
+
+plot(out)
+
+```
+
+From these plots, we can observe that the Markov chain has converged. The trace plots of all the variables show stable fluctuations around a mean value, without any apparent trends or drifts, suggesting good mixing of the Markov Chain Monte Carlo (MCMC) samples. Additionally, the density plots indicate a smooth unimodal distribution, which also supports this convergence. This convergence can also be stated from the next plots that show the ACF and PACF of the MCMC.
+
+```{r}
+# Load required libraries
+library(coda)  # For convergence diagnostics
+
+# Convert the logistic regression performed by mcmc to a mcmc object 
+mcmc_out <- as.mcmc(out)
+
+# Plot autocorrelations 
+par(mfrow = c(1, 3))  # Row for plots 
+
+acf(mcmc_out[, 1], main = "Autocorrelation of Intercept") # Intercept
+acf(mcmc_out[, 2], main = "Autocorrelation of Glucose")   # Glucose
+acf(mcmc_out[, 4], main = "Autocorrelation of BMI")       # BMI
+acf(mcmc_out[, 3], main = "Autocorrelation of DiabetesPedigreeFunction") # DPF
+acf(mcmc_out[, 5], main = "Autocorrelation of BloodPressure") #BloodPressure
+
+```
+
+Let's check these conclusions with the summary of the model:
+
+```{r}
+summary(out)
+```
+
+Analyzing the means and the sd we can state that all the variables are significant. The formula all the model would be:  
+$$
+log( \frac{p_i}{1-p_i})=-10.21 +0.05 \cdot x_{1i}+0.07 \cdot x_{2i}+ 1.18 \cdot x_{3i}+ 0.001 \cdot x_{4i}
+$$
+Showing that the influence of the Glucose is higher than the BMI in the model, both affecting positively to the fact of having diabetes (remember that $y_i\in\{0,1\}$).
+
+The standard deviation means the uncertainty of the estimation of the coefficients, which is very low in this case, so we can say that the model is very confident about the coefficients. They are with respect to the posterior distribution.
+
+The time series standard error is the standard deviation of the coefficients in the time series. It account for potential autocorrelation in MCMC samples.
+
+Finally we have the values according to different quantiles. Using them (especially $0.025$ and $0.975$ for a significance level of $\alpha=0.05$) we can compute the credible interval for every parameter of the model.
+
+
+### 2.3. Evaluation of the model
+
+We are going to test the accuracy of the model in out test dataset.
+
+```{r}
+test_MCMCLogit <- function(output_MCMCLogit, test_set, columns){
+  posterior_summary <- summary(output_MCMCLogit)
+  posterior_means <- posterior_summary$statistics[, "Mean"]
+
+  X_test <- as.matrix(test_set[, columns])
+  
+  # Add intercept column
+  X_test <- cbind(1, X_test)
+  
+  # Compute predictions using posterior means
+  logit_pred_mean <- X_test %*% posterior_means
+  prob_pred_mean <- 1 / (1 + exp(-logit_pred_mean))
+  
+  # Convert probabilities to class labels (threshold = 0.5)
+  class_pred_mean <- ifelse(prob_pred_mean > 0.5, 1, 0)
+  
+  conf_matrix_mean <- confusionMatrix(factor(class_pred_mean), 
+                                      factor(test$Outcome))
+  
+  # Print results
+  print("Confusion Matrix using Posterior Means:")
+  print(conf_matrix_mean)
+  
+  accuracy_mean <- mean(class_pred_mean == test$Outcome)
+  print(paste("Accuracy using Posterior Means:", accuracy_mean))
+}
+library(caret)
+
+test_MCMCLogit(out, test, c("Glucose", "BMI", "DiabetesPedigreeFunction", "BloodPressure"))
+```
+
+The logistic regression model has an accuracy of 76.92%. The model catches most diabetes cases (85.37% sensitivity), but it's less reliable when deciding if someone doesn’t have diabetes (57.14% specificity). Overall, we can state that the model performs well in predicting diabetes, however some improvements could enhance its performance when distinguishing non-diabetic cases with better precision.
+
+
+
+### 2.4. Different priors
+
+Another approach that can derive to a different conclusion is the selection of a different prior for each parameter $\beta_i$. 
+
+The function `MCMClogit` needs the joint density function of this priors as an input in order to work properly. As we saw in the correlation matrix, the selected variables aren't correlated, which means that they are linearly dependent. This doesn't imply independence, but in order to continue with this section we need to assume that premise. 
+
+As all the variables regarded after preprocessing the data are continuous and positive, we decided that they could resemble to an exponential distribution. 
+
+$$
+\beta_i \sim Exp(\lambda) \text{ } \forall i>0
+$$
+
+For the intercept coefficient we maintain the same a priori distribution, because we can't assume anything different. 
+
+$$
+\beta_0 \sim N(0, \infty)
+$$
+
+In the function `exponential_joint_prior`, we define the different marginal distributions for the different coefficients. Regard that the approach to obtain the joint distribution is based on the sum of the marginal distribution logarithms. 
+```{r, cache =TRUE}
+# Definir la función conjunta del prior con prior exponencial para Glucose y BMI
+exponential_joint_prior <- function(beta, 
+                                    intercept_mean = 0, intercept_sd = 1000,
+                                    exp_rate = 0.0001) {
+  # Prior para el intercepto: N(0,1)
+  log_prior_intercept <- dnorm(beta[1], mean = intercept_mean, sd = intercept_sd, 
+                               log = TRUE)
+  
+  # Para Glucose y BMI, usar prior exponencial.
+  # Si el valor es negativo, se retorna -Inf.
+  if(beta[2] < 0 || beta[3] < 0 || beta[4] < 0 || beta[5] < 0 ) {
+    return(-Inf)
+  }
+  
+  log_prior_glucose <- dexp(beta[2], rate = exp_rate, log = TRUE)
+  log_prior_BMI     <- dexp(beta[3], rate = exp_rate, log = TRUE)
+  log_prior_blood_preasure <- dexp(beta[5], rate = exp_rate, log = TRUE)
+  log_prior_DPF <- dexp(beta[4], rate = exp_rate, log = TRUE)
+  
+  total_log_prior <- log_prior_intercept + log_prior_glucose + log_prior_BMI 
+  + log_prior_blood_preasure + log_prior_DPF
+  return(total_log_prior)
+}
+
+
+```
+
+
+
+As before, we apply the function `MCMClogit`, adding our prior joint density and setting the parameters. For the exponential distributions, we set $\lambda = 0.0001$ in order to be improper.
+```{r, cache = TRUE}
+# exponencial prior MCMClogit
+set.seed(456)
+fit_exp <- MCMClogit(Outcome ~ Glucose + BMI + DiabetesPedigreeFunction + BloodPressure, 
+                     data = train, 
+                     burnin = 10000, 
+                     mcmc = 21000,
+                     user.prior.density = exponential_joint_prior,
+                     logfun = TRUE,  # Indicate that we return the log density
+                     thin = 30,
+                     intercept_mean = 0, intercept_sd = 1000,
+                     exp_rate = 0.0001)
+
+summary(fit_exp)
+```
+
+Looking at the coefficients mean and standard deviation, we can state that they seem significant.
+
+The model can be regarded as:
+
+$$
+log( \frac{p_i}{1-p_i})=-10.71 +0.04786 \cdot x_{1i}+0.06767 \cdot x_{2i}+ 1.294\cdot x_{3i}+ 0.01354\cdot x_{4i}
+$$
+All estimated coefficients (except the intercept, which is negative) are positive. This suggests that higher values of Glucose, BMI, BloodPressure, and DiabetesPedigreeFunction are associated with increased log-odds of having diabetes. Notably, **DiabetesPedigreeFunction** has the largest coefficient $\approx 1.28$, indicating it has a relatively strong impact on the risk of diabetes in this model. The standard deviation (SD) reported in the summary reflects the posterior uncertainty of each parameter. In this output, the SDs for Glucose, BMI, and BloodPressure are quite small, suggesting the model is relatively confident about these estimates. The time-series standard error accounts for autocorrelation within the MCMC samples. Again, these are small, indicating that the chain is mixing well and that the posterior estimates for each parameter are stable.
+
+Furthermore, none of the intervals appear to cross zero, suggesting that all these predictors have a significant effect in the model.
+
+```{r}
+plot(fit_exp)
+```
+
+The trace plots for each parameter show stable, well-mixed chains without strong trends or drifts, indicating good convergence. The density plots are roughly unimodal and do not show signs of multimodality or heavy tails. This further supports the idea that the sampler converged to a stable posterior distribution. 
+
+
+```{r}
+# Convert the logistic regression performed by mcmc to a mcmc object 
+mcmc_out <- as.mcmc(fit_exp)
+
+# Plot autocorrelations 
+par(mfrow = c(1, 3))  # Row for plots 
+
+acf(mcmc_out[, 1], main = "Autocorrelation of Intercept") 
+acf(mcmc_out[, 2], main = "Autocorrelation of Glucose")   
+acf(mcmc_out[, 3], main = "Autocorrelation of BMI") 
+acf(mcmc_out[, 4], main = "Autocorrelation of DiabetesPedigreeFunction") 
+acf(mcmc_out[, 5], main = "Autocorrelation of BloodPressure") 
+ 
+```
+
+The autocorrelation plots for the parameters show that autocorrelation drops off quickly. Low autocorrelation means the chain is exploring the posterior efficiently.
+
+```{r}
+test_MCMCLogit <- function(output_MCMCLogit, test_set, columns){
+  posterior_summary <- summary(output_MCMCLogit)
+  posterior_means <- posterior_summary$statistics[, "Mean"]
+
+  X_test <- as.matrix(test_set[, columns])
+  
+  # Add intercept column
+  X_test <- cbind(1, X_test)
+  
+  # Compute predictions using posterior means
+  logit_pred_mean <- X_test %*% posterior_means
+  prob_pred_mean <- 1 / (1 + exp(-logit_pred_mean))
+  
+  # Convert probabilities to class labels (threshold = 0.5)
+  class_pred_mean <- ifelse(prob_pred_mean > 0.5, 1, 0)
+  
+  conf_matrix_mean <- confusionMatrix(factor(class_pred_mean), factor(test$Outcome))
+  
+  # Print results
+  print("Confusion Matrix using Posterior Means:")
+  print(conf_matrix_mean)
+  
+  accuracy_mean <- mean(class_pred_mean == test$Outcome)
+  print(paste("Accuracy using Posterior Means:", accuracy_mean))
+}
+
+test_MCMCLogit(fit_exp, test, c("Glucose", "BMI", "DiabetesPedigreeFunction","BloodPressure"
+                                ))
+```
+
+Finally, after evaluating classification metrics such as accuracy, specificity, and sensitivity, we observed that the results are essentially the same as in the previous model. This suggests that incorporating the new priors did not significantly alter the predictive performance, and the updated Bayesian logistic regression model achieves classification metrics consistent with the original approach.
+
+
+## 4. Comparison with a frequentist logistic regression
+
+In this section we are going to compute a frequentist logistic regression to compare if the results are similar to ours. This approach Maximum likelihood estimators to approximate the coefficients of the logistic regression.
+
+```{r}
+classic = glm (Outcome~ Glucose + BMI + DiabetesPedigreeFunction + BloodPressure, data= train, family = binomial) 
+summary(classic)
+```
+
+In this model all coefficients are significant except BloodPressure, which can be caused because of the relation between the variables. The final model using frequentist approach follows this formula:
+
+
+$$
+log( \frac{p_i}{1-p_i})=-9.953 +0.046 \cdot x_{1i}+ 0.0709 \cdot x_{2i}+ 1.205 \cdot x_{3i}+  0.004 \cdot x_{4i}
+$$
+
+## 5. Conclusions
+
+Overall, if we compare the coefficients from the three the models we can conclude they have similar coefficients: 
+
+|                         | Intercept | $\beta_1$ | $\beta_2$ | $\beta_3$ | $\beta_4$ |
+|-------------------------|-----------|-----------|-----------|-----------|-----------|
+| MCMClogit (out)         | -10.21    | 0.05      | 0.07      | 1.18      | 0.001     |
+| New prior (fit_exp)     | -10.71    | 0.05      | 0.07      | 1.29      | 0.01      |
+| Frequentist             | -9.95     | 0.05      | 0.07      | 1.21      | 0.004     |
+
+
+This means that the predictions would be similar using both methods. However, with the bayesian approach we can achieve a distribution for the log(likelihood) from the posterior distribution of the betas, from where we can study the uncertainty of our predictions; which is a result we couldn't have got with the frequentist approach.
+
